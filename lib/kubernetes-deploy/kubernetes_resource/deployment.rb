@@ -2,6 +2,7 @@
 module KubernetesDeploy
   class Deployment < KubernetesResource
     TIMEOUT = 7.minutes
+    REQUIRED_ROLLOUT_TYPES = %w(maxUnavailable full none).freeze
 
     def sync
       raw_json, _err, st = kubectl.run("get", type, @name, "--output=json")
@@ -19,6 +20,8 @@ module KubernetesDeploy
         conditions = deployment_data.fetch("status", {}).fetch("conditions", [])
         @progress_condition = conditions.find { |condition| condition['type'] == 'Progressing' }
         @progress_deadline = deployment_data['spec']['progressDeadlineSeconds']
+        @required_rollout = deployment_data.dig('metadata', 'annotations',
+          'kubernetes-deploy.shopify.io/required-rollout')
       else # reset
         @latest_rs = nil
         @rollout_data = { "replicas" => 0 }
@@ -43,10 +46,19 @@ module KubernetesDeploy
     def deploy_succeeded?
       return false unless @latest_rs.present?
 
-      @latest_rs.deploy_succeeded? &&
-      @latest_rs.desired_replicas == @desired_replicas && # latest RS fully scaled up
-      @rollout_data["updatedReplicas"].to_i == @desired_replicas &&
-      @rollout_data["updatedReplicas"].to_i == @rollout_data["availableReplicas"].to_i
+      case required_rollout_type
+      when 'full'
+        @latest_rs.deploy_succeeded? &&
+        @latest_rs.desired_replicas == @desired_replicas && # latest RS fully scaled up
+        @rollout_data["updatedReplicas"].to_i == @desired_replicas &&
+        @rollout_data["updatedReplicas"].to_i == @rollout_data["availableReplicas"].to_i
+      else
+        minimum_needed = minimum_replicas_to_succeeded
+
+        @latest_rs.desired_replicas >= minimum_needed &&
+        @latest_rs.ready_replicas >= minimum_needed &&
+        @latest_rs.available_replicas >= minimum_needed
+      end
     end
 
     def deploy_failed?
@@ -81,6 +93,17 @@ module KubernetesDeploy
       @found
     end
 
+    def validate_definition
+      super
+
+      unless REQUIRED_ROLLOUT_TYPES.include?(required_rollout_type)
+        @validation_error_msg = "#{required_rollout_type} is not valid for required-rollout."\
+          " Acceptable options: #{REQUIRED_ROLLOUT_TYPES}"
+        return false
+      end
+      true
+    end
+
     private
 
     def deploy_failing_to_progress?
@@ -98,18 +121,22 @@ module KubernetesDeploy
       Time.parse(@progress_condition["lastUpdateTime"]).to_i >= (@deploy_started_at - 5.seconds).to_i
     end
 
-    def find_latest_rs(deployment_data)
-      label_string = deployment_data["spec"]["selector"]["matchLabels"].map { |k, v| "#{k}=#{v}" }.join(",")
+    def all_rs_data(match_labels)
+      label_string = match_labels.map { |k, v| "#{k}=#{v}" }.join(",")
       raw_json, _err, st = kubectl.run("get", "replicasets", "--output=json", "--selector=#{label_string}")
-      return unless st.success?
+      return {} unless st.success?
 
-      all_rs_data = JSON.parse(raw_json)["items"]
+      JSON.parse(raw_json)["items"]
+    end
+
+    def find_latest_rs(deployment_data)
       current_revision = deployment_data["metadata"]["annotations"]["deployment.kubernetes.io/revision"]
 
-      latest_rs_data = all_rs_data.find do |rs|
+      latest_rs_data = all_rs_data(deployment_data["spec"]["selector"]["matchLabels"]).find do |rs|
         rs["metadata"]["ownerReferences"].any? { |ref| ref["uid"] == deployment_data["metadata"]["uid"] } &&
         rs["metadata"]["annotations"]["deployment.kubernetes.io/revision"] == current_revision
       end
+
       return unless latest_rs_data.present?
 
       rs = ReplicaSet.new(
@@ -122,6 +149,29 @@ module KubernetesDeploy
       )
       rs.sync(latest_rs_data)
       rs
+    end
+
+    def required_rollout_type
+      def_required_rollout = @definition.dig('metadata', 'annotations', 'kubernetes-deploy.shopify.io/required-rollout')
+      @required_rollout || def_required_rollout || 'full'
+    end
+
+    def minimum_replicas_to_succeeded
+      desired = @desired_replicas
+
+      case required_rollout_type
+      when 'maxUnavailable'
+        max_unavailable = @definition.dig('spec', 'strategy', 'rollingUpdate', 'maxUnavailable')
+        if max_unavailable =~ /%/
+          (desired * (100 - max_unavailable.to_i) / 100.0).ceil
+        else
+          desired - max_unavailable.to_i
+        end
+      when 'none'
+        0
+      else
+        desired
+      end
     end
   end
 end

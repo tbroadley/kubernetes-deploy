@@ -632,6 +632,18 @@ invalid type for io.k8s.apimachinery.pkg.apis.meta.v1.ObjectMeta.labels:",
     ])
   end
 
+  def test_deploy_successful_with_partial_availability
+    result = deploy_fixtures("slow-cloud")
+    assert_deploy_success(result)
+
+    result = deploy_fixtures("slow-cloud")
+    assert_deploy_success(result)
+
+    assert_logs_match_all(
+      [%r{Deployment\/web\s+3 replicas, [23] updatedReplicas, 3 availableReplicas}]
+    )
+  end
+
   def test_deploy_aborts_immediately_if_metadata_name_missing
     result = deploy_fixtures("hello-cloud", subset: ["configmap-data.yml"]) do |fixtures|
       definition = fixtures["configmap-data.yml"]["ConfigMap"].first
