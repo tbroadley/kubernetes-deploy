@@ -1,8 +1,8 @@
 # frozen_string_literal: true
 require 'kubernetes-deploy/kubernetes_resource'
 require 'kubernetes-deploy/kubeclient_builder'
-require "pry"
-require 'jsonpath'
+require "active_record"
+require "jsonpath"
 
 module KubernetesDeploy
   class DiscoverableResource < KubernetesResource
@@ -138,7 +138,7 @@ module KubernetesDeploy
     end
 
     def self.parse_bool(value)
-      value.to_s == "true" # value could be nil
+      ActiveRecord::Type::Boolean.new.cast(value)
     end
 
     def self.parse_timeout(type, timeout)
