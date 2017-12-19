@@ -640,7 +640,7 @@ invalid type for io.k8s.apimachinery.pkg.apis.meta.v1.ObjectMeta.labels:",
     assert_deploy_success(result)
 
     assert_logs_match_all(
-      [%r{Deployment\/web\s+3 replicas, [23] updatedReplicas, 3 availableReplicas}]
+      [%r{Deployment\/web\s+[34] replicas, 3 updatedReplicas, 2 availableReplicas, [12] unavailableReplica}]
     )
   end
 
